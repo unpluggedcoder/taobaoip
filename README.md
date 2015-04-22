@@ -15,6 +15,7 @@ Fetch ip information from the database at http://ip.taobao.com
                             The output destination of result, default is stdout
 
 ![Image text](https://github.com/Ghostist/taobaoip/blob/master/screenshot/screenshot1.png)
+
 ![Image text](https://github.com/Ghostist/taobaoip/blob/master/screenshot/screenshot2.png)
 
 # Note
