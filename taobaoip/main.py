@@ -10,6 +10,7 @@ import Queue
 import urllib
 import json
 import iprange
+from progressbar import *
 
 cancel = False
 
@@ -52,25 +53,26 @@ def main():
     
     jobs = Queue.Queue()
     results = Queue.Queue()
+    progress = Queue.Queue()
+    
     ratelimit = RateLimit(10, 1)     # ip.taobao.com limit the rate with 10qps
-    concurrency = multiprocessing.cpu_count() * 2
-    starttime = time.time()
+    concurrency = multiprocessing.cpu_count() * 4
     
-    create_threads(ratelimit, jobs, results, target, concurrency)
+    create_threads(ratelimit, jobs, results, target, concurrency, progress)
     count = add_jobs(jobs, ip_range)
+    pbar = create_progressbar(count, progress)
     wait(count, jobs, results)
+    pbar.finish()
     
-    span = time.time() - starttime
-    print >>sys.stderr, "Cost times: {0:.3f}s".format(span)
     target.flush()
     logging.shutdown()
     
-def create_threads(ratelimit, jobs, results, target, concurrency):
+def create_threads(ratelimit, jobs, results, target, concurrency, progress):
     for _ in range(concurrency):
-        thread = threading.Thread(target=worker, args=(ratelimit, jobs, results))
+        thread = threading.Thread(target=worker, args=(ratelimit, jobs, results, progress))
         thread.daemon = True
         thread.start()
-    output_thread = threading.Thread(target=process, args=(target, results))
+    output_thread = threading.Thread(target=process, args=(target, results, progress))
     output_thread.daemon = True
     output_thread.start()
 
@@ -79,9 +81,17 @@ def add_jobs(jobs, ip_range):
         jobs.put(ip)
     return count
 
+def create_progressbar(count, progress):
+    widgets = ["Processing {} ip(s): ".format(count), Percentage(), ' ', Bar(marker=RotatingMarker()),
+                               ' ', ETA()]
+    pbar = ProgressBar(widgets=widgets, maxval=count).start()    
+    prog_thread = threading.Thread(target=progproc, args=(pbar, count, progress))
+    prog_thread.daemon = True
+    prog_thread.start()
+    return pbar
+
 def wait(count, jobs, results):
     global cancel
-    print >>sys.stderr, "Processing {} ip(s)".format(count)
     try:
         jobs.join()
         results.join()
@@ -152,7 +162,7 @@ def fetch(ip):
         return 0, result
     return 1, result
 
-def worker(ratelimit, jobs, results):
+def worker(ratelimit, jobs, results, progress):
     global cancel
     while not cancel:
         try:
@@ -161,6 +171,7 @@ def worker(ratelimit, jobs, results):
             ok, result = fetch(ip)
             if not ok:
                 logging.error("Fetch information failed, ip:{}".format(ip))
+                progress.put("") # Notify the progress even it failed
             elif result is not None:
                 results.put(" ".join(result))
             jobs.task_done()    # Notify one item
@@ -169,7 +180,7 @@ def worker(ratelimit, jobs, results):
         except:
             logging.exception("Unknown Error!")
 
-def process(target, results):
+def process(target, results, progress):
     global cancel
     while not cancel:
         try:
@@ -178,7 +189,24 @@ def process(target, results):
             pass
         else:
             print >>target, line
+            progress.put("")
             results.task_done()
+
+def progproc(progressbar, count, progress):
+    """
+    Since ProgressBar is not a thread-safe class, we use a Queue to do the counting job, like
+    two other threads. Use this thread do the printing of progress bar. By the way, it will
+    print to stderr, which does not conflict with the default result output(stdout).
+    """
+    idx = 1
+    while True:
+        try:
+            progress.get(timeout=5)
+        except Queue.Empty:
+            pass
+        else:
+            progressbar.update(idx)
+            idx += 1
 
 if __name__ == "__main__":
     main()
