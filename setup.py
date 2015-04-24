@@ -3,7 +3,7 @@
 from setuptools import setup, find_packages
 
 setup(name='taobaoip',
-      version='0.9',
+      version='1.0',
       description='A tool for get ip information from http://ip.taobao.com',
       author='Unplugged Coder',
       author_email='unpluggedcoder@163.com',

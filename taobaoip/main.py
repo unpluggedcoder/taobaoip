@@ -10,7 +10,46 @@ import Queue
 import urllib
 import json
 import iprange
+import MySQLdb
 from progressbar import *
+
+db_host = "localhost"
+db_username = "root"
+db_password = ""
+db_name = "geoip"
+db_table = "geoip"
+
+TABLES = {}
+TABLES[db_table] = (
+    "CREATE TABLE IF NOT EXISTS `{}` ("
+    "  `id` BIGINT NOT NULL AUTO_INCREMENT,"
+    "  `ip` varchar(50) NOT NULL,"    
+    "  `country` text,"
+    "  `country_id` text,"
+    "  `area` text,"
+    "  `area_id` text,"
+    "  `region` text,"
+    "  `region_id` text,"
+    "  `city` text,"
+    "  `city_id` text,"
+    "  `county` text,"
+    "  `county_id` text,"
+    "  `isp` text,"
+    "  `isp_id` text,"
+    "  `update` timestamp NOT NULL,"
+    "  PRIMARY KEY (`id`,`ip`), UNIQUE KEY `ip` (`ip`)"
+    ") DEFAULT CHARSET=UTF8".format(db_table))
+
+insert_ip = (
+    "REPLACE INTO {table} "
+    "(ip, country, country_id, area, area_id, region, region_id, "
+    " city, city_id, county, county_id, isp, isp_id) "
+    " VALUES ('{ip}', '{country}', '{country_id}', '{area}', '{area_id}', '{region}', '{region_id}', "
+    " '{city}', '{city_id}', '{county}', '{county_id}', '{isp}', '{isp_id}')")
+
+output_format = (
+    "{ip} {country} {country_id} {area} {area_id} {region} {region_id} "
+    "{city} {city_id} {county} {county_id} {isp} {isp_id}")
 
 cancel = False
 
@@ -19,6 +58,23 @@ def initlog():
     logfile = os.path.join(os.getcwd(), logfilename)
     logging.basicConfig(filename = logfilename, level = logging.DEBUG, filemode = 'w', 
                         format = '%(asctime)s - %(levelname)s: %(message)s')
+    
+def initdb():
+    try:
+        db = MySQLdb.Connection(host=db_host, user=db_username, passwd=db_password, init_command="set names utf8")
+        cursor = db.cursor()
+        
+        cursor.execute("CREATE DATABASE IF NOT EXISTS {} DEFAULT CHARACTER SET 'utf8'".format(db_name))
+        cursor.execute("USE {}".format(db_name))
+        #cursor.select_db(db_name)
+        
+        cursor.execute(TABLES[db_table])
+        db.commit()
+        return (1, db)
+    except MySQLdb.Error as err:
+        logging.exception("Initial database failed!");
+        return (0, None)
+        
     
 def gettarget(output):
     try:
@@ -48,31 +104,40 @@ def interrupt_handler(signal, frame):
 def main():
     ip_range, output = handle_commandline()
     initlog()
-    target = gettarget(output)
+    ok , db = initdb()
+    if not ok:
+        exit(1)
+    
     signal.signal(signal.SIGINT, interrupt_handler)
+    target = gettarget(output)
     
     jobs = Queue.Queue()
     results = Queue.Queue()
     progress = Queue.Queue()
     
     ratelimit = RateLimit(10, 1)     # ip.taobao.com limit the rate with 10qps
-    concurrency = multiprocessing.cpu_count() * 4
+    concurrency = multiprocessing.cpu_count() * 10
     
-    create_threads(ratelimit, jobs, results, target, concurrency, progress)
+    create_threads(ratelimit, jobs, results, target, concurrency, progress, db)
     count = add_jobs(jobs, ip_range)
+    
     pbar = create_progressbar(count, progress)
-    wait(count, jobs, results)
+    wait(jobs, results, progress)
     pbar.finish()
     
     target.flush()
+    if db is not None:
+        db.commit()
+        db.close()
+    
     logging.shutdown()
     
-def create_threads(ratelimit, jobs, results, target, concurrency, progress):
+def create_threads(ratelimit, jobs, results, target, concurrency, progress, db):
     for _ in range(concurrency):
-        thread = threading.Thread(target=worker, args=(ratelimit, jobs, results, progress))
+        thread = threading.Thread(target=worker, args=(ratelimit, jobs, progress, results))
         thread.daemon = True
         thread.start()
-    output_thread = threading.Thread(target=process, args=(target, results, progress))
+    output_thread = threading.Thread(target=output, args=(target, progress, results, db))
     output_thread.daemon = True
     output_thread.start()
 
@@ -90,11 +155,12 @@ def create_progressbar(count, progress):
     prog_thread.start()
     return pbar
 
-def wait(count, jobs, results):
+def wait(jobs, results, progress):
     global cancel
     try:
         jobs.join()
         results.join()
+        progress.join()
     except KeyboardInterrupt:
         print "Canceling..."
         cancel = True
@@ -137,24 +203,24 @@ class RateLimit:
 
 def fetch(ip):
     url = 'http://ip.taobao.com/service/getIpInfo.php?ip=' + ip
-    result = []
+    result = {}
     try:
         response = urllib.urlopen(url).read()
         jsondata = json.loads(response)
         if jsondata[u'code'] == 0:
-            result.append(jsondata[u'data'][u'ip'].encode('utf-8'))            
-            result.append(jsondata[u'data'][u'country'].encode('utf-8'))
-            result.append(jsondata[u'data'][u'country_id'].encode('utf-8'))
-            result.append(jsondata[u'data'][u'area'].encode('utf-8'))
-            result.append(jsondata[u'data'][u'area_id'].encode('utf-8'))
-            result.append(jsondata[u'data'][u'region'].encode('utf-8'))
-            result.append(jsondata[u'data'][u'region_id'].encode('utf-8'))
-            result.append(jsondata[u'data'][u'city'].encode('utf-8'))
-            result.append(jsondata[u'data'][u'city_id'].encode('utf-8'))
-            result.append(jsondata[u'data'][u'county'].encode('utf-8'))
-            result.append(jsondata[u'data'][u'county_id'].encode('utf-8'))
-            result.append(jsondata[u'data'][u'isp'].encode('utf-8'))
-            result.append(jsondata[u'data'][u'isp_id'].encode('utf-8'))            
+            result['ip'] = jsondata[u'data'][u'ip'].encode('utf-8')          
+            result['country'] = jsondata[u'data'][u'country'].encode('utf-8')
+            result['country_id'] = jsondata[u'data'][u'country_id'].encode('utf-8')
+            result['area'] = jsondata[u'data'][u'area'].encode('utf-8')
+            result['area_id'] = jsondata[u'data'][u'area_id'].encode('utf-8')
+            result['region'] = jsondata[u'data'][u'region'].encode('utf-8')
+            result['region_id'] = jsondata[u'data'][u'region_id'].encode('utf-8')
+            result['city'] = jsondata[u'data'][u'city'].encode('utf-8')
+            result['city_id'] = jsondata[u'data'][u'city_id'].encode('utf-8')
+            result['county'] = jsondata[u'data'][u'county'].encode('utf-8')
+            result['county_id'] = jsondata[u'data'][u'county_id'].encode('utf-8')
+            result['isp'] = jsondata[u'data'][u'isp'].encode('utf-8')
+            result['isp_id'] = jsondata[u'data'][u'isp_id'].encode('utf-8')
         else:
             return 0, result
     except:
@@ -162,35 +228,47 @@ def fetch(ip):
         return 0, result
     return 1, result
 
-def worker(ratelimit, jobs, results, progress):
+def worker(ratelimit, jobs, progress, results):
     global cancel
     while not cancel:
         try:
             ratelimit.ratecontrol()
             ip = jobs.get(timeout=2) # Wait 2 seconds
             ok, result = fetch(ip)
+            
             if not ok:
                 logging.error("Fetch information failed, ip:{}".format(ip))
                 progress.put("") # Notify the progress even it failed
-            elif result is not None:
-                results.put(" ".join(result))
-            jobs.task_done()    # Notify one item
+            else:
+                results.put(result)
+            
+            jobs.task_done()    # Notify one job
         except Queue.Empty:
             pass
         except:
             logging.exception("Unknown Error!")
-
-def process(target, results, progress):
+    
+def output(target, progress, results, db):
     global cancel
+    global output_format, insert_ip
     while not cancel:
         try:
-            line = results.get(timeout=5)
-        except Queue.Empty:
-            pass
-        else:
+            items = results.get(timeout=5)
+            line = output_format.format(**items)
             print >>target, line
+            if db is not None:
+                items['table'] = db_table
+                cursor = db.cursor()
+                sql = insert_ip.format(**items)
+                cursor.execute(sql)
+                db.commit()            
             progress.put("")
             results.task_done()
+        except Queue.Empty:
+            pass
+        except:
+            logging.exception("Output item failed")
+            
 
 def progproc(progressbar, count, progress):
     """
@@ -202,11 +280,13 @@ def progproc(progressbar, count, progress):
     while True:
         try:
             progress.get(timeout=5)
-        except Queue.Empty:
-            pass
-        else:
             progressbar.update(idx)
             idx += 1
+            progress.task_done()
+        except Queue.Empty:
+            pass
+        except:
+            logging.exception("Unknown Error!")
 
 if __name__ == "__main__":
     main()
