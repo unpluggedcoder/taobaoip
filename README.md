@@ -13,6 +13,15 @@ Fetch ip information from the database at http://ip.taobao.com
       -h, --help            show this help message and exit
       -o OUTPUT, --output OUTPUT
                             The output destination of result, default is stdout
+## Database surrport
+	Change main.py to fit your own database configuration.
+```python
+db_host = "localhost"
+db_username = "root"
+db_password = ""
+db_name = "geoip"
+db_table = "geoip"
+```
 
 ![Image text](https://github.com/Ghostist/taobaoip/blob/master/screenshot/screenshot1.png)
 
